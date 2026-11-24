@@ -6,10 +6,11 @@
 import {
     FaceLandmarker,
     FilesetResolver,
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/vision_bundle.mjs";
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs";
 
 // -------------------- DOM Elements --------------------
 const video = document.getElementById("webcam");
+const videoWrapper = document.getElementById("videoWrapper");
 const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
 const warningEl = document.getElementById("warning");
@@ -35,6 +36,7 @@ const SLEEP_THRESHOLD_FRAMES = 15;
 const COVER_THRESHOLD_FRAMES = 20;
 const EYE_RATIO_THRESHOLD = 11.0;
 const PHONE_CONFIDENCE = 0.5;
+const PHONE_CHECK_INTERVAL = 400; // ms between phone inference runs
 
 // -------------------- State --------------------
 let faceLandmarker = null;
@@ -45,13 +47,16 @@ let animFrameId = null;
 let closedFrames = 0;
 let coveredFrames = 0;
 let currentPlaying = null;
+let lastVideoTime = 0;
+
 let lastPhoneCheck = 0;
-const PHONE_CHECK_INTERVAL = 500; // Check phone every 500ms (heavy model)
+let isCheckingPhone = false;
+let cachedPhoneBoxes = [];
 
 // -------------------- Helpers --------------------
-function distance(p1, p2) {
-    const dx = p1.x - p2.x;
-    const dy = p1.y - p2.y;
+function distance(p1, p2, width, height) {
+    const dx = (p1.x - p2.x) * width;
+    const dy = (p1.y - p2.y) * height;
     return Math.sqrt(dx * dx + dy * dy);
 }
 
@@ -64,11 +69,31 @@ function hideWarning() {
     warningEl.className = "warning hidden";
 }
 
+function unlockAudio() {
+    [alarmSleep, alarmFace, alarmPhone].forEach((audio) => {
+        audio.muted = true;
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+            playPromise
+                .then(() => {
+                    audio.pause();
+                    audio.currentTime = 0;
+                    audio.muted = false;
+                })
+                .catch(() => {
+                    audio.muted = false;
+                });
+        } else {
+            audio.muted = false;
+        }
+    });
+}
+
 function isAudioPlaying() {
     return (
-        (!alarmSleep.paused) ||
-        (!alarmFace.paused) ||
-        (!alarmPhone.paused)
+        !alarmSleep.paused ||
+        !alarmFace.paused ||
+        !alarmPhone.paused
     );
 }
 
@@ -81,25 +106,33 @@ function playAlarm(audioEl, label) {
 }
 
 // -------------------- Model Loading --------------------
-async function loadModels() {
-    statusText.textContent = "Status: Loading Face Model...";
-    dotFace.className = "dot loading";
-
-    const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm"
-    );
-
-    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+async function createFaceLandmarker(vision, delegate) {
+    return FaceLandmarker.createFromOptions(vision, {
         baseOptions: {
             modelAssetPath:
                 "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-            delegate: "GPU",
+            delegate,
         },
         runningMode: "VIDEO",
         numFaces: 1,
         outputFaceBlendshapes: false,
         outputFacialTransformationMatrixes: false,
     });
+}
+
+async function loadModels() {
+    statusText.textContent = "Status: Loading Face Model...";
+    dotFace.className = "dot loading";
+
+    const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm"
+    );
+
+    try {
+        faceLandmarker = await createFaceLandmarker(vision, "GPU");
+    } catch {
+        faceLandmarker = await createFaceLandmarker(vision, "CPU");
+    }
 
     dotFace.className = "dot active";
     statusText.textContent = "Status: Loading Phone Model...";
@@ -123,6 +156,7 @@ async function startCamera() {
         video.onloadedmetadata = () => {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
+            videoWrapper.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
             resolve();
         };
     });
@@ -136,29 +170,75 @@ function stopCamera() {
     }
 }
 
+// -------------------- Phone Detection (Non-blocking) --------------------
+async function checkPhoneAsync() {
+    if (!phoneDetector || isCheckingPhone || video.readyState < 2) return;
+    isCheckingPhone = true;
+    try {
+        const predictions = await phoneDetector.detect(video);
+        if (!isRunning) return;
+
+        cachedPhoneBoxes = predictions
+            .filter((p) => p.class === "cell phone" && p.score > PHONE_CONFIDENCE)
+            .map((p) => ({ bbox: p.bbox, score: p.score }));
+    } catch (err) {
+        console.warn("Phone detection error:", err);
+    } finally {
+        isCheckingPhone = false;
+    }
+}
+
+function drawPhoneBoxes() {
+    for (const item of cachedPhoneBoxes) {
+        const [x, y, w, h] = item.bbox;
+        // Video is mirrored via CSS scaleX(-1), so mirror X coordinate to align overlay & keep text readable
+        const mirroredX = canvas.width - x - w;
+
+        ctx.strokeStyle = "#ff00ff";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(mirroredX, y, w, h);
+
+        const label = `Phone ${Math.round(item.score * 100)}%`;
+        ctx.font = "bold 16px Inter, sans-serif";
+        const textWidth = ctx.measureText(label).width;
+        const labelY = y > 26 ? y - 24 : y + h + 2;
+
+        ctx.fillStyle = "#ff00ff";
+        ctx.fillRect(mirroredX, labelY, textWidth + 12, 22);
+
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(label, mirroredX + 6, labelY + 16);
+    }
+}
+
 // -------------------- Detection Loop --------------------
-async function detectLoop() {
+function detectLoop() {
     if (!isRunning) return;
 
     const now = performance.now();
-
-    // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (video.readyState < 2) {
+        animFrameId = requestAnimationFrame(detectLoop);
+        return;
+    }
 
     // ----- 1. Face Detection -----
     let isSleepy = false;
     let isFaceCovered = false;
 
     if (faceLandmarker) {
-        const faceResults = faceLandmarker.detectForVideo(video, now);
+        const timestamp = Math.max(Math.round(now), lastVideoTime + 1);
+        lastVideoTime = timestamp;
+        const faceResults = faceLandmarker.detectForVideo(video, timestamp);
 
         if (faceResults.faceLandmarks && faceResults.faceLandmarks.length > 0) {
             coveredFrames = 0;
             const lm = faceResults.faceLandmarks[0];
 
-            const eyeDist = distance(lm[LEFT_EYE_TOP], lm[LEFT_EYE_BOTTOM]);
-            const faceDist = distance(lm[FACE_LEFT], lm[FACE_RIGHT]);
-            const ratio = (eyeDist / faceDist) * 100;
+            const eyeDist = distance(lm[LEFT_EYE_TOP], lm[LEFT_EYE_BOTTOM], canvas.width, canvas.height);
+            const faceDist = distance(lm[FACE_LEFT], lm[FACE_RIGHT], canvas.width, canvas.height);
+            const ratio = faceDist > 0 ? (eyeDist / faceDist) * 100 : 0;
 
             eyeRatioEl.textContent = `Eye Ratio: ${Math.round(ratio)}`;
 
@@ -183,34 +263,15 @@ async function detectLoop() {
         }
     }
 
-    // ----- 2. Phone Detection (throttled) -----
-    let phoneDetected = false;
-
-    if (phoneDetector && now - lastPhoneCheck > PHONE_CHECK_INTERVAL) {
+    // ----- 2. Phone Detection (throttled & non-blocking) -----
+    if (phoneDetector && !isCheckingPhone && now - lastPhoneCheck >= PHONE_CHECK_INTERVAL) {
         lastPhoneCheck = now;
+        checkPhoneAsync();
+    }
 
-        const predictions = await phoneDetector.detect(video);
-
-        for (const pred of predictions) {
-            if (pred.class === "cell phone" && pred.score > PHONE_CONFIDENCE) {
-                phoneDetected = true;
-
-                // Draw bounding box (mirror-aware)
-                const [x, y, w, h] = pred.bbox;
-                ctx.strokeStyle = "#ff00ff";
-                ctx.lineWidth = 3;
-                ctx.strokeRect(x, y, w, h);
-
-                ctx.fillStyle = "#ff00ff";
-                ctx.font = "bold 16px Inter, sans-serif";
-                ctx.fillText(
-                    `Phone ${Math.round(pred.score * 100)}%`,
-                    x,
-                    y > 20 ? y - 6 : y + h + 18
-                );
-                break;
-            }
-        }
+    const phoneDetected = cachedPhoneBoxes.length > 0;
+    if (phoneDetected) {
+        drawPhoneBoxes();
     }
 
     // ----- 3. Alarm & Warning Logic -----
@@ -249,6 +310,7 @@ async function detectLoop() {
 // -------------------- Start / Stop --------------------
 async function startMonitoring() {
     startBtn.disabled = true;
+    unlockAudio();
     statusText.textContent = "Status: Starting camera...";
 
     try {
@@ -291,6 +353,10 @@ function stopMonitoring() {
     closedFrames = 0;
     coveredFrames = 0;
     currentPlaying = null;
+    lastVideoTime = 0;
+    lastPhoneCheck = 0;
+    isCheckingPhone = false;
+    cachedPhoneBoxes = [];
 
     startBtn.disabled = false;
     stopBtn.disabled = true;
