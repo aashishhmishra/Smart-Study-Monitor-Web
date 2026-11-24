@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Study Monitor</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 Smart Study Monitor</h1>
+            <p class="subtitle">AI-powered focus assistant — detects drowsiness, face covering & phone usage</p>
+        </header>
+
+        <div class="monitor-area">
+            <div class="video-wrapper" id="videoWrapper">
+                <video id="webcam" autoplay playsinline muted></video>
+                <canvas id="overlay"></canvas>
+                <div id="warning" class="warning hidden"></div>
+                <div id="eyeRatioDisplay" class="eye-ratio hidden">Eye Ratio: --</div>
+                <div id="placeholder" class="placeholder">
+                    <span class="placeholder-icon">🎥</span>
+                    <p>Click <strong>Start Monitoring</strong> to begin</p>
+                </div>
+            </div>
+
+            <div class="controls">
+                <button id="startBtn" class="btn btn-start">▶ Start Monitoring</button>
+                <button id="stopBtn" class="btn btn-stop" disabled>⏹ Stop</button>
+            </div>
+
+            <div class="status-bar">
+                <div class="status-item">
+                    <span class="dot" id="dotFace">●</span>
+                    <span>Face Detection</span>
+                </div>
+                <div class="status-item">
+                    <span class="dot" id="dotPhone">●</span>
+                    <span>Phone Detection</span>
+                </div>
+                <div class="status-item" id="statusText">
+                    Status: Ready
+                </div>
+            </div>
+        </div>
+
+        <div class="features">
+            <div class="feature-card">
+                <span class="feature-icon">😴</span>
+                <h3>Sleep Detection</h3>
+                <p>Detects closed eyes and plays alarm to wake you up</p>
+            </div>
+            <div class="feature-card">
+                <span class="feature-icon">🙈</span>
+                <h3>Face Cover Detection</h3>
+                <p>Alerts when your face is hidden or covered</p>
+            </div>
+            <div class="feature-card">
+                <span class="feature-icon">📱</span>
+                <h3>Phone Detection</h3>
+                <p>Detects mobile phone and reminds you to focus</p>
+            </div>
+        </div>
+
+        <footer>
+            <p>Built with MediaPipe & TensorFlow.js | by <a href="https://dibyendup.netlify.app" target="_blank">Dibyendu Pradhan</a> | Web version by Aashish</p>
+        </footer>
+    </div>
+
+    <!-- Audio elements -->
+    <audio id="alarmSleep" src="audio/alarm.mp3" preload="auto"></audio>
+    <audio id="alarmFace" src="audio/faudio.mp3" preload="auto"></audio>
+    <audio id="alarmPhone" src="audio/paudio.mp3" preload="auto"></audio>
+
+    <!-- TensorFlow.js & COCO-SSD for phone detection -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+    <!-- App script (module for MediaPipe imports) -->
+    <script type="module" src="app.js"></script>
+</body>
+</html>
